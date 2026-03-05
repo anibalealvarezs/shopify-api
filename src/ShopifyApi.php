@@ -39,7 +39,7 @@ class ShopifyApi extends ApiKeyClient
         $this->analyticsToken = $analyticsToken;
         $this->storeName = $shopName;
         $this->accountType = AccountType::from($accountType);
-        return parent::__construct(
+        parent::__construct(
             baseUrl: "https://".$shopName.".myshopify.com/admin/api/".$version."/",
             apiKey: $apiKey,
             authSettings: [
@@ -47,6 +47,9 @@ class ShopifyApi extends ApiKeyClient
                 "name" => "X-Shopify-Access-Token",
             ],
         );
+
+        $this->setResponseErrorDetector('errors');
+        $this->setErrorMessageParser(fn ($data) => is_array($data['errors']) ? json_encode($data['errors']) : $data['errors']);
     }
 
     /**
@@ -67,7 +70,7 @@ class ShopifyApi extends ApiKeyClient
      * @param int $sleep
      * @param array $customErrors
      * @param bool $ignoreAuth
-     * @return Response
+     * @return mixed
      * @throws GuzzleException
      */
     public function performRequest(
@@ -83,12 +86,13 @@ class ShopifyApi extends ApiKeyClient
         bool $verify = false,
         bool $allowNewToken = true,
         string $pathToSave = "",
-        bool $stream = null,
-        ?array $errorMessageNesting = null, // Ex: ['error' => ['message']]
+        ?bool $stream = null,
+        mixed $errorMessageNesting = null,
         int $sleep = 0,
         array $customErrors = [], // Ex: ['403' => 'body'] or ['500' => 'code'] or ['404' => 'message']
         bool $ignoreAuth = false,
-    ): Response {
+        mixed $onFailure = null,
+    ): mixed {
 
         $sleep = match($this->accountType) {
             AccountType::standard => 500000,
@@ -114,6 +118,7 @@ class ShopifyApi extends ApiKeyClient
             sleep: $sleep,
             customErrors: $customErrors,
             ignoreAuth: $ignoreAuth,
+            onFailure: $onFailure,
         );
     }
 
@@ -155,7 +160,7 @@ class ShopifyApi extends ApiKeyClient
         bool $includeHeaders = false,
         SortOptions $sort = SortOptions::idAsc,
     ): array {
-        $query =[];
+        $query = [];
 
         if ($pageInfo) {
             $query["page_info"] = $pageInfo;
@@ -248,7 +253,7 @@ class ShopifyApi extends ApiKeyClient
         bool $includeHeaders = false,
         SortOptions $sort = SortOptions::idAsc,
     ): array {
-        $query =[];
+        $query = [];
 
         if ($pageInfo) {
             $query["page_info"] = $pageInfo;
@@ -344,7 +349,7 @@ class ShopifyApi extends ApiKeyClient
         bool $includeHeaders = false,
         SortOptions $sort = SortOptions::idAsc,
     ): array {
-        $query =[];
+        $query = [];
 
         if ($pageInfo) {
             $query["page_info"] = $pageInfo;
@@ -435,7 +440,7 @@ class ShopifyApi extends ApiKeyClient
         ?int $limit = 250, // Max: 250,
         bool $includeHeaders = false,
     ): array {
-        $query =[];
+        $query = [];
 
         if ($pageInfo) {
             $query["page_info"] = $pageInfo;
@@ -484,7 +489,7 @@ class ShopifyApi extends ApiKeyClient
         ?string $updatedAtMin = null,
         ?string $updatedAtMax = null,
     ): array {
-        $query =[];
+        $query = [];
 
         if ($createdAtMin) {
             $query["created_at_min"] = $createdAtMin;
@@ -532,7 +537,7 @@ class ShopifyApi extends ApiKeyClient
         ?string $updatedAtMin = null,
         ?string $updatedAtMax = null,
     ): array {
-        $query =[];
+        $query = [];
 
         if ($createdAtMin) {
             $query["created_at_min"] = $createdAtMin;
@@ -583,7 +588,7 @@ class ShopifyApi extends ApiKeyClient
         ?string $updatedAtMax = null,
         ?string $vendor = null,
     ): array {
-        $query =[];
+        $query = [];
 
         if ($collectionId) {
             $query["collection_id"] = $collectionId;
@@ -861,7 +866,7 @@ class ShopifyApi extends ApiKeyClient
         ?int $limit = 250, // Max: 250,
         bool $includeHeaders = false,
     ): array {
-        $query =[];
+        $query = [];
 
         if ($pageInfo) {
             $query["page_info"] = $pageInfo;
@@ -949,7 +954,7 @@ class ShopifyApi extends ApiKeyClient
         bool $includeHeaders = false,
         SortOptions $sort = SortOptions::idAsc,
     ): array {
-        $query =[];
+        $query = [];
 
         if ($pageInfo) {
             $query["page_info"] = $pageInfo;
@@ -1100,7 +1105,7 @@ class ShopifyApi extends ApiKeyClient
         bool $includeHeaders = false,
         SortOptions $sort = SortOptions::idAsc,
     ): array {
-        $query =[];
+        $query = [];
 
         if ($pageInfo) {
             $query["page_info"] = $pageInfo;
@@ -1260,7 +1265,7 @@ class ShopifyApi extends ApiKeyClient
         bool $includeHeaders = false,
         SortOptions $sort = SortOptions::idAsc,
     ): array {
-        $query =[];
+        $query = [];
 
         if ($pageInfo) {
             $query["page_info"] = $pageInfo;
@@ -1398,7 +1403,7 @@ class ShopifyApi extends ApiKeyClient
         ?int $collectionId = null,
         bool $includeHeaders = false,
     ): array {
-        $query =[];
+        $query = [];
 
         if ($pageInfo) {
             $query["page_info"] = $pageInfo;
@@ -1468,7 +1473,7 @@ class ShopifyApi extends ApiKeyClient
         ?int $sinceId = null,
         bool $includeHeaders = false,
     ): array {
-        $query =[];
+        $query = [];
 
         if ($pageInfo) {
             $query["page_info"] = $pageInfo;
@@ -1589,7 +1594,7 @@ class ShopifyApi extends ApiKeyClient
             'source' => $source,
             'token' => $this->analyticsToken,
         ];
-        foreach($shopifyQl as $value) {
+        foreach ($shopifyQl as $value) {
             $body = [...$body, 'q[]' => $value];
         }
         // Request the spreadsheet data

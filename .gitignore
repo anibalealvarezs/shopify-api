@@ -1,3 +1,5 @@
 /vendor/
 /.idea/
 /config/config.yaml
+/.vscode/
+phpstan.neon
