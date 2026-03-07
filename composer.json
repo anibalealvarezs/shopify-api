@@ -1,13 +1,18 @@
 {
     "name": "anibalealvarezs/shopify-api",
-    "description": "description",
+    "description": "Standardized Shopify Admin API client for data extraction and integration within the APIs Hub ecosystem.",
     "license": "MIT",
+    "keywords": ["shopify-api", "ecommerce", "apis-hub", "data-extraction", "php", "guzzle"],
+    "homepage": "https://github.com/anibalealvarezs/shopify-api",
     "authors": [
         {
             "name": "Aníbal Álvarez",
             "email": "anibalealvarezs@gmail.com"
         }
     ],
+    "support": {
+        "issues": "https://github.com/anibalealvarezs/shopify-api/issues"
+    },
     "require": {
         "php": ">=8.1",
         "guzzlehttp/guzzle": "^7.0",
