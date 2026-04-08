@@ -1624,4 +1624,187 @@ class ShopifyApi extends ApiKeyClient
         }
         return $contents;
     }
+
+    /**
+     * @param string|null $createdAtMin
+     * @param string|null $createdAtMax
+     * @param array|null $fields
+     * @param FinancialStatus|null $financialStatus
+     * @param FulfillmentStatus|null $fulfillmentStatus
+     * @param array|null $ids
+     * @param int|null $limit
+     * @param string|null $processedAtMin
+     * @param string|null $processedAtMax
+     * @param int|null $sinceId
+     * @param Status|null $status
+     * @param string|null $updatedAtMin
+     * @param string|null $updatedAtMax
+     * @param SortOptions $sort
+     * @param callable|null $callback
+     * @return void
+     * @throws GuzzleException
+     */
+    public function getAllOrdersAndProcess(
+        ?string $createdAtMin = null,
+        ?string $createdAtMax = null,
+        ?array $fields = null,
+        ?FinancialStatus $financialStatus = null,
+        ?FulfillmentStatus $fulfillmentStatus = null,
+        ?array $ids = null,
+        ?int $limit = 250,
+        ?string $processedAtMin = null,
+        ?string $processedAtMax = null,
+        ?int $sinceId = null,
+        ?Status $status = Status::any,
+        ?string $updatedAtMin = null,
+        ?string $updatedAtMax = null,
+        SortOptions $sort = SortOptions::idAsc,
+        ?callable $callback = null
+    ): void {
+        $pageInfo = null;
+        do {
+            $response = $this->getOrders(
+                pageInfo: $pageInfo,
+                createdAtMin: $createdAtMin,
+                createdAtMax: $createdAtMax,
+                fields: $fields,
+                financialStatus: $financialStatus,
+                fulfillmentStatus: $fulfillmentStatus,
+                ids: $ids,
+                limit: $limit,
+                processedAtMin: $processedAtMin,
+                processedAtMax: $processedAtMax,
+                sinceId: $sinceId,
+                status: $status,
+                updatedAtMin: $updatedAtMin,
+                updatedAtMax: $updatedAtMax,
+                includeHeaders: true,
+                sort: $sort,
+            );
+            if (!empty($response['body']['orders']) && $callback) {
+                $callback($response['body']['orders']);
+            }
+        } while (isset($response['headers']) && ($pageInfo = $this->getNextCursorLink($response['headers'])));
+    }
+
+    /**
+     * @param string|null $createdAtMin
+     * @param string|null $createdAtMax
+     * @param array|null $fields
+     * @param array|null $ids
+     * @param int|null $limit
+     * @param int|null $sinceId
+     * @param string|null $updatedAtMin
+     * @param string|null $updatedAtMax
+     * @param SortOptions $sort
+     * @param callable|null $callback
+     * @return void
+     * @throws GuzzleException
+     */
+    public function getAllCustomersAndProcess(
+        ?string $createdAtMin = null,
+        ?string $createdAtMax = null,
+        ?array $fields = null,
+        ?array $ids = null,
+        ?int $limit = 250,
+        ?int $sinceId = null,
+        ?string $updatedAtMin = null,
+        ?string $updatedAtMax = null,
+        SortOptions $sort = SortOptions::idAsc,
+        ?callable $callback = null
+    ): void {
+        $pageInfo = null;
+        do {
+            $response = $this->getCustomers(
+                pageInfo: $pageInfo,
+                createdAtMin: $createdAtMin,
+                createdAtMax: $createdAtMax,
+                fields: $fields,
+                ids: $ids,
+                limit: $limit,
+                sinceId: $sinceId,
+                updatedAtMin: $updatedAtMin,
+                updatedAtMax: $updatedAtMax,
+                includeHeaders: true,
+                sort: $sort,
+            );
+            if (!empty($response['body']['customers']) && $callback) {
+                $callback($response['body']['customers']);
+            }
+        } while (isset($response['headers']) && ($pageInfo = $this->getNextCursorLink($response['headers'])));
+    }
+
+    /**
+     * @param string|null $collectionId
+     * @param string|null $createdAtMin
+     * @param string|null $createdAtMax
+     * @param array|null $fields
+     * @param array|null $handle
+     * @param array|null $ids
+     * @param int|null $limit
+     * @param array|null $presentmentCurrencies
+     * @param string|null $productType
+     * @param string|null $publishedAtMin
+     * @param string|null $publishedAtMax
+     * @param int|null $sinceId
+     * @param PublishedStatus|null $status
+     * @param string|null $title
+     * @param string|null $updatedAtMin
+     * @param string|null $updatedAtMax
+     * @param string|null $vendor
+     * @param SortOptions $sort
+     * @param callable|null $callback
+     * @return void
+     * @throws GuzzleException
+     */
+    public function getAllProductsAndProcess(
+        ?string $collectionId = null,
+        ?string $createdAtMin = null,
+        ?string $createdAtMax = null,
+        ?array $fields = null,
+        ?array $handle = null,
+        ?array $ids = null,
+        ?int $limit = 250,
+        ?array $presentmentCurrencies = null,
+        ?string $productType = null,
+        ?string $publishedAtMin = null,
+        ?string $publishedAtMax = null,
+        ?int $sinceId = null,
+        ?PublishedStatus $status = null,
+        ?string $title = null,
+        ?string $updatedAtMin = null,
+        ?string $updatedAtMax = null,
+        ?string $vendor = null,
+        SortOptions $sort = SortOptions::idAsc,
+        ?callable $callback = null
+    ): void {
+        $pageInfo = null;
+        do {
+            $response = $this->getProducts(
+                pageInfo: $pageInfo,
+                collectionId: $collectionId,
+                createdAtMin: $createdAtMin,
+                createdAtMax: $createdAtMax,
+                fields: $fields,
+                handle: $handle,
+                ids: $ids,
+                limit: $limit,
+                presentmentCurrencies: $presentmentCurrencies,
+                productType: $productType,
+                publishedAtMin: $publishedAtMin,
+                publishedAtMax: $publishedAtMax,
+                sinceId: $sinceId,
+                status: $status,
+                title: $title,
+                updatedAtMin: $updatedAtMin,
+                updatedAtMax: $updatedAtMax,
+                vendor: $vendor,
+                includeHeaders: true,
+                sort: $sort,
+            );
+            if (!empty($response['body']['products']) && $callback) {
+                $callback($response['body']['products']);
+            }
+        } while (isset($response['headers']) && ($pageInfo = $this->getNextCursorLink($response['headers'])));
+    }
 }
