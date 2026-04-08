@@ -1807,4 +1807,81 @@ class ShopifyApi extends ApiKeyClient
             }
         } while (isset($response['headers']) && ($pageInfo = $this->getNextCursorLink($response['headers'])));
     }
+    /**
+     * @param string|null $createdAtMin
+     * @param string|null $createdAtMax
+     * @param string|null $endsAtMin
+     * @param string|null $endsAtMax
+     * @param int|null $limit
+     * @param int|null $sinceId
+     * @param string|null $startsAtMin
+     * @param string|null $startsAtMax
+     * @param int|null $timesUsed
+     * @param string|null $updatedAtMin
+     * @param string|null $updatedAtMax
+     * @param string|null $pageInfo
+     * @param callable|null $callback
+     * @return void
+     * @throws GuzzleException
+     */
+    public function getAllPriceRulesAndProcess(
+        ?string $createdAtMin = null,
+        ?string $createdAtMax = null,
+        ?string $endsAtMin = null,
+        ?string $endsAtMax = null,
+        ?int $limit = 250,
+        ?int $sinceId = null,
+        ?string $startsAtMin = null,
+        ?string $startsAtMax = null,
+        ?int $timesUsed = null,
+        ?string $updatedAtMin = null,
+        ?string $updatedAtMax = null,
+        ?string $pageInfo = null,
+        ?callable $callback = null
+    ): void {
+        do {
+            $response = $this->getPriceRules(
+                pageInfo: $pageInfo,
+                createdAtMin: $createdAtMin,
+                createdAtMax: $createdAtMax,
+                endsAtMin: $endsAtMin,
+                endsAtMax: $endsAtMax,
+                limit: $limit,
+                sinceId: $sinceId,
+                startsAtMin: $startsAtMin,
+                startsAtMax: $startsAtMax,
+                timesUsed: $timesUsed,
+                updatedAtMin: $updatedAtMin,
+                updatedAtMax: $updatedAtMax,
+                includeHeaders: true
+            );
+            if (!empty($response['body']['price_rules']) && $callback) {
+                $callback($response['body']['price_rules']);
+            }
+        } while (isset($response['headers']) && ($pageInfo = $this->getNextCursorLink($response['headers'])));
+    }
+
+    /**
+     * @param string|int $priceRuleId
+     * @param string|null $pageInfo
+     * @param callable|null $callback
+     * @return void
+     * @throws GuzzleException
+     */
+    public function getAllDiscountCodesAndProcess(
+        string|int $priceRuleId,
+        ?string $pageInfo = null,
+        ?callable $callback = null
+    ): void {
+        do {
+            $response = $this->getDiscountCodes(
+                priceRuleId: $priceRuleId,
+                pageInfo: $pageInfo,
+                includeHeaders: true
+            );
+            if (!empty($response['body']['discount_codes']) && $callback) {
+                $callback($response['body']['discount_codes']);
+            }
+        } while (isset($response['headers']) && ($pageInfo = $this->getNextCursorLink($response['headers'])));
+    }
 }
