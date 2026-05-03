@@ -27,6 +27,7 @@ class ShopifyApi extends ApiKeyClient
      * @param string $version
      * @param string $analyticsToken
      * @param string $accountType
+     * @param \GuzzleHttp\Client|null $guzzleClient
      * @throws GuzzleException
      */
     public function __construct(
@@ -35,6 +36,7 @@ class ShopifyApi extends ApiKeyClient
         string $version = "2023-01",
         string $analyticsToken = "",
         string $accountType = 'standard',
+        ?\GuzzleHttp\Client $guzzleClient = null,
     ) {
         $this->analyticsToken = $analyticsToken;
         $this->storeName = $shopName;
@@ -46,6 +48,7 @@ class ShopifyApi extends ApiKeyClient
                 "location" => "header",
                 "name" => "X-Shopify-Access-Token",
             ],
+            guzzleClient: $guzzleClient,
         );
 
         $this->setResponseErrorDetector('errors');
@@ -120,6 +123,62 @@ class ShopifyApi extends ApiKeyClient
             ignoreAuth: $ignoreAuth,
             onFailure: $onFailure,
         );
+    }
+
+    protected function fetchShopifyAllAndProcess(
+        callable $callback,
+        string $endpoint,
+        array $query = [],
+        string $dataKey = null,
+    ): void {
+        $nextPageInfo = null;
+
+        do {
+            if ($nextPageInfo) {
+                // When using page_info, we MUST NOT include other parameters except limit and fields
+                $pageQuery = [
+                    'page_info' => $nextPageInfo,
+                    'limit' => $query['limit'] ?? 250,
+                ];
+                if (isset($query['fields'])) {
+                    $pageQuery['fields'] = $query['fields'];
+                }
+            } else {
+                $pageQuery = $query;
+            }
+
+            $response = $this->performRequest(
+                method: 'GET',
+                endpoint: $endpoint,
+                query: $pageQuery,
+            );
+
+            $data = json_decode($response->getBody()->getContents(), true);
+            $items = $dataKey ? ($data[$dataKey] ?? []) : $data;
+
+            $callback($items);
+
+            $nextPageInfo = $this->extractNextPageInfo($response);
+        } while ($nextPageInfo);
+    }
+
+    /**
+     * @param Response $response
+     * @return string|null
+     */
+    protected function extractNextPageInfo(Response $response): ?string
+    {
+        $linkHeader = $response->getHeaderLine('Link');
+        if (!$linkHeader) {
+            return null;
+        }
+
+        // Search for rel="next"
+        if (preg_match('/<[^>]*page_info=([^>&\s]+)[^>]*>; rel="next"/', $linkHeader, $matches)) {
+            return $matches[1];
+        }
+
+        return null;
     }
 
     /**
@@ -226,6 +285,123 @@ class ShopifyApi extends ApiKeyClient
     }
 
     /**
+     * @param string|null $createdAtMin
+     * @param string|null $createdAtMax
+     * @param array|null $fields
+     * @param FinancialStatus|null $financialStatus
+     * @param FulfillmentStatus|null $fulfillmentStatus
+     * @param array|null $ids
+     * @param int|null $limit
+     * @param string|null $processedAtMin
+     * @param string|null $processedAtMax
+     * @param int|null $sinceId
+     * @param Status|null $status
+     * @param string|null $updatedAtMin
+     * @param string|null $updatedAtMax
+     * @param SortOptions $sort
+     * @return array
+     * @throws GuzzleException
+     */
+    public function getOrdersAll(
+        ?string $createdAtMin = null,
+        ?string $createdAtMax = null,
+        ?array $fields = null,
+        ?FinancialStatus $financialStatus = null,
+        ?FulfillmentStatus $fulfillmentStatus = null,
+        ?array $ids = null,
+        ?int $limit = 250,
+        ?string $processedAtMin = null,
+        ?string $processedAtMax = null,
+        ?int $sinceId = null,
+        ?Status $status = Status::any,
+        ?string $updatedAtMin = null,
+        ?string $updatedAtMax = null,
+        SortOptions $sort = SortOptions::idAsc,
+    ): array {
+        $orders = [];
+        $this->getOrdersAllAndProcess(
+            callback: function ($data) use (&$orders) {
+                $orders = array_merge($orders, $data);
+            },
+            createdAtMin: $createdAtMin,
+            createdAtMax: $createdAtMax,
+            fields: $fields,
+            financialStatus: $financialStatus,
+            fulfillmentStatus: $fulfillmentStatus,
+            ids: $ids,
+            limit: $limit,
+            processedAtMin: $processedAtMin,
+            processedAtMax: $processedAtMax,
+            sinceId: $sinceId,
+            status: $status,
+            updatedAtMin: $updatedAtMin,
+            updatedAtMax: $updatedAtMax,
+            sort: $sort,
+        );
+        return ['orders' => $orders];
+    }
+
+    /**
+     * @param callable $callback
+     * @param string|null $createdAtMin
+     * @param string|null $createdAtMax
+     * @param array|null $fields
+     * @param FinancialStatus|null $financialStatus
+     * @param FulfillmentStatus|null $fulfillmentStatus
+     * @param array|null $ids
+     * @param int|null $limit
+     * @param string|null $processedAtMin
+     * @param string|null $processedAtMax
+     * @param int|null $sinceId
+     * @param Status|null $status
+     * @param string|null $updatedAtMin
+     * @param string|null $updatedAtMax
+     * @param SortOptions $sort
+     * @return void
+     * @throws GuzzleException
+     */
+    public function getOrdersAllAndProcess(
+        callable $callback,
+        ?string $createdAtMin = null,
+        ?string $createdAtMax = null,
+        ?array $fields = null,
+        ?FinancialStatus $financialStatus = null,
+        ?FulfillmentStatus $fulfillmentStatus = null,
+        ?array $ids = null,
+        ?int $limit = 250,
+        ?string $processedAtMin = null,
+        ?string $processedAtMax = null,
+        ?int $sinceId = null,
+        ?Status $status = Status::any,
+        ?string $updatedAtMin = null,
+        ?string $updatedAtMax = null,
+        SortOptions $sort = SortOptions::idAsc,
+    ): void {
+        $query = [];
+        if ($createdAtMin) $query["created_at_min"] = $createdAtMin;
+        if ($createdAtMax) $query["created_at_max"] = $createdAtMax;
+        if ($financialStatus) $query["financial_status"] = $financialStatus->value;
+        if ($fulfillmentStatus) $query["fulfillment_status"] = $fulfillmentStatus->value;
+        if ($ids) $query["ids"] = implode(",", $ids);
+        if ($processedAtMin) $query["processed_at_min"] = $processedAtMin;
+        if ($processedAtMax) $query["processed_at_max"] = $processedAtMax;
+        if ($sinceId) $query["since_id"] = $sinceId;
+        if ($status) $query["status"] = $status->value;
+        if ($updatedAtMin) $query["updated_at_min"] = $updatedAtMin;
+        if ($updatedAtMax) $query["updated_at_max"] = $updatedAtMax;
+        if ($sort) $query["order"] = $sort->value;
+        if ($fields) $query["fields"] = implode(",", $fields);
+        $query["limit"] = $limit;
+
+        $this->fetchShopifyAllAndProcess(
+            callback: $callback,
+            endpoint: "orders.json",
+            query: $query,
+            dataKey: 'orders',
+        );
+    }
+
+    /**
      * @param string|null $pageInfo
      * @param string|null $createdAtMin
      * @param string|null $createdAtMax
@@ -301,6 +477,93 @@ class ShopifyApi extends ApiKeyClient
             ];
         }
         return json_decode($response->getBody()->getContents(), true);
+    }
+
+    /**
+     * @param string|null $createdAtMin
+     * @param string|null $createdAtMax
+     * @param array|null $fields
+     * @param array|null $ids
+     * @param int|null $limit
+     * @param int|null $sinceId
+     * @param string|null $updatedAtMin
+     * @param string|null $updatedAtMax
+     * @param SortOptions $sort
+     * @return array
+     * @throws GuzzleException
+     */
+    public function getCustomersAll(
+        ?string $createdAtMin = null,
+        ?string $createdAtMax = null,
+        ?array $fields = null,
+        ?array $ids = null,
+        ?int $limit = 250,
+        ?int $sinceId = null,
+        ?string $updatedAtMin = null,
+        ?string $updatedAtMax = null,
+        SortOptions $sort = SortOptions::idAsc,
+    ): array {
+        $customers = [];
+        $this->getCustomersAllAndProcess(
+            callback: function ($data) use (&$customers) {
+                $customers = array_merge($customers, $data);
+            },
+            createdAtMin: $createdAtMin,
+            createdAtMax: $createdAtMax,
+            fields: $fields,
+            ids: $ids,
+            limit: $limit,
+            sinceId: $sinceId,
+            updatedAtMin: $updatedAtMin,
+            updatedAtMax: $updatedAtMax,
+            sort: $sort,
+        );
+        return ['customers' => $customers];
+    }
+
+    /**
+     * @param callable $callback
+     * @param string|null $createdAtMin
+     * @param string|null $createdAtMax
+     * @param array|null $fields
+     * @param array|null $ids
+     * @param int|null $limit
+     * @param int|null $sinceId
+     * @param string|null $updatedAtMin
+     * @param string|null $updatedAtMax
+     * @param SortOptions $sort
+     * @return void
+     * @throws GuzzleException
+     */
+    public function getCustomersAllAndProcess(
+        callable $callback,
+        ?string $createdAtMin = null,
+        ?string $createdAtMax = null,
+        ?array $fields = null,
+        ?array $ids = null,
+        ?int $limit = 250,
+        ?int $sinceId = null,
+        ?string $updatedAtMin = null,
+        ?string $updatedAtMax = null,
+        SortOptions $sort = SortOptions::idAsc,
+    ): void {
+        $query = [];
+        if ($createdAtMin) $query["created_at_min"] = $createdAtMin;
+        if ($createdAtMax) $query["created_at_max"] = $createdAtMax;
+        if ($ids) $query["ids"] = implode(",", $ids);
+        if ($sinceId) $query["since_id"] = $sinceId;
+        if ($updatedAtMin) $query["updated_at_min"] = $updatedAtMin;
+        if ($updatedAtMax) $query["updated_at_max"] = $updatedAtMax;
+        if ($sort) $query["order"] = $sort->value;
+        if ($fields) $query["fields"] = implode(",", $fields);
+        $query["limit"] = $limit;
+
+        $this->fetchShopifyAllAndProcess(
+            callback: $callback,
+            endpoint: "customers.json",
+            query: $query,
+            dataKey: 'customers',
+        );
     }
 
     /**
@@ -427,6 +690,147 @@ class ShopifyApi extends ApiKeyClient
     }
 
     /**
+     * @param string|null $collectionId
+     * @param string|null $createdAtMin
+     * @param string|null $createdAtMax
+     * @param array|null $fields
+     * @param array|null $handle
+     * @param array|null $ids
+     * @param int|null $limit
+     * @param array|null $presentmentCurrencies
+     * @param string|null $productType
+     * @param string|null $publishedAtMin
+     * @param string|null $publishedAtMax
+     * @param int|null $sinceId
+     * @param PublishedStatus|null $status
+     * @param string|null $title
+     * @param string|null $updatedAtMin
+     * @param string|null $updatedAtMax
+     * @param string|null $vendor
+     * @param SortOptions $sort
+     * @return array
+     * @throws GuzzleException
+     */
+    public function getProductsAll(
+        ?string $collectionId = null,
+        ?string $createdAtMin = null,
+        ?string $createdAtMax = null,
+        ?array $fields = null,
+        ?array $handle = null,
+        ?array $ids = null,
+        ?int $limit = 250,
+        ?array $presentmentCurrencies = null,
+        ?string $productType = null,
+        ?string $publishedAtMin = null,
+        ?string $publishedAtMax = null,
+        ?int $sinceId = null,
+        ?PublishedStatus $status = null,
+        ?string $title = null,
+        ?string $updatedAtMin = null,
+        ?string $updatedAtMax = null,
+        ?string $vendor = null,
+        SortOptions $sort = SortOptions::idAsc,
+    ): array {
+        $products = [];
+        $this->getProductsAllAndProcess(
+            callback: function ($data) use (&$products) {
+                $products = array_merge($products, $data);
+            },
+            collectionId: $collectionId,
+            createdAtMin: $createdAtMin,
+            createdAtMax: $createdAtMax,
+            fields: $fields,
+            handle: $handle,
+            ids: $ids,
+            limit: $limit,
+            presentmentCurrencies: $presentmentCurrencies,
+            productType: $productType,
+            publishedAtMin: $publishedAtMin,
+            publishedAtMax: $publishedAtMax,
+            sinceId: $sinceId,
+            status: $status,
+            title: $title,
+            updatedAtMin: $updatedAtMin,
+            updatedAtMax: $updatedAtMax,
+            vendor: $vendor,
+            sort: $sort,
+        );
+        return ['products' => $products];
+    }
+
+    /**
+     * @param callable $callback
+     * @param string|null $collectionId
+     * @param string|null $createdAtMin
+     * @param string|null $createdAtMax
+     * @param array|null $fields
+     * @param array|null $handle
+     * @param array|null $ids
+     * @param int|null $limit
+     * @param array|null $presentmentCurrencies
+     * @param string|null $productType
+     * @param string|null $publishedAtMin
+     * @param string|null $publishedAtMax
+     * @param int|null $sinceId
+     * @param PublishedStatus|null $status
+     * @param string|null $title
+     * @param string|null $updatedAtMin
+     * @param string|null $updatedAtMax
+     * @param string|null $vendor
+     * @param SortOptions $sort
+     * @return void
+     * @throws GuzzleException
+     */
+    public function getProductsAllAndProcess(
+        callable $callback,
+        ?string $collectionId = null,
+        ?string $createdAtMin = null,
+        ?string $createdAtMax = null,
+        ?array $fields = null,
+        ?array $handle = null,
+        ?array $ids = null,
+        ?int $limit = 250,
+        ?array $presentmentCurrencies = null,
+        ?string $productType = null,
+        ?string $publishedAtMin = null,
+        ?string $publishedAtMax = null,
+        ?int $sinceId = null,
+        ?PublishedStatus $status = null,
+        ?string $title = null,
+        ?string $updatedAtMin = null,
+        ?string $updatedAtMax = null,
+        ?string $vendor = null,
+        SortOptions $sort = SortOptions::idAsc,
+    ): void {
+        $query = [];
+        if ($collectionId) $query["collection_id"] = $collectionId;
+        if ($createdAtMin) $query["created_at_min"] = $createdAtMin;
+        if ($createdAtMax) $query["created_at_max"] = $createdAtMax;
+        if ($handle) $query["handle"] = implode(",", $handle);
+        if ($ids) $query["ids"] = implode(",", $ids);
+        if ($presentmentCurrencies) $query["presentment_currencies"] = implode(",", $presentmentCurrencies);
+        if ($productType) $query["product_type"] = $productType;
+        if ($publishedAtMin) $query["published_at_min"] = $publishedAtMin;
+        if ($publishedAtMax) $query["published_at_max"] = $publishedAtMax;
+        if ($sinceId) $query["since_id"] = $sinceId;
+        if ($status) $query["status"] = $status->value;
+        if ($title) $query["title"] = $title;
+        if ($updatedAtMin) $query["updated_at_min"] = $updatedAtMin;
+        if ($updatedAtMax) $query["updated_at_max"] = $updatedAtMax;
+        if ($vendor) $query["vendor"] = $vendor;
+        if ($sort) $query["order"] = $sort->value;
+        if ($fields) $query["fields"] = implode(",", $fields);
+        $query["limit"] = $limit;
+
+        $this->fetchShopifyAllAndProcess(
+            callback: $callback,
+            endpoint: "products.json",
+            query: $query,
+            dataKey: 'products',
+        );
+    }
+
+    /**
      * @param int[] $ids
      * @param string|null $pageInfo
      * @param int|null $limit
@@ -467,6 +871,51 @@ class ShopifyApi extends ApiKeyClient
             ];
         }
         return json_decode($response->getBody()->getContents(), true);
+    }
+
+    /**
+     * @param int[] $ids
+     * @param int|null $limit
+     * @return array
+     * @throws GuzzleException
+     */
+    public function getInventoryItemsAll(
+        array $ids,
+        ?int $limit = 250,
+    ): array {
+        $items = [];
+        $this->getInventoryItemsAllAndProcess(
+            callback: function ($data) use (&$items) {
+                $items = array_merge($items, $data);
+            },
+            ids: $ids,
+            limit: $limit,
+        );
+        return ['inventory_items' => $items];
+    }
+
+    /**
+     * @param callable $callback
+     * @param int[] $ids
+     * @param int|null $limit
+     * @return void
+     * @throws GuzzleException
+     */
+    public function getInventoryItemsAllAndProcess(
+        callable $callback,
+        array $ids,
+        ?int $limit = 250,
+    ): void {
+        $query = [];
+        if ($ids) $query["ids"] = implode(",", $ids);
+        $query["limit"] = $limit;
+
+        $this->fetchShopifyAllAndProcess(
+            callback: $callback,
+            endpoint: "inventory_items.json",
+            query: $query,
+            dataKey: 'inventory_items',
+        );
     }
 
     /**
