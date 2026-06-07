@@ -4,3 +4,5 @@
 /.vscode/
 phpstan.neon
 **/.php-cs-fixer.dist.php
+
+.copilot/composer-path-repositories.backup.json
