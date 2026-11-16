@@ -90,7 +90,7 @@
             array        $headers = [],
             array        $additionalHeaders = [], // Ex: ["Amazon-Advertising-API-Scope" => 'profileId'];
             ?CookieJar   $cookies = null,
-            bool         $verify = false,
+            bool         $verify = true,
             bool         $allowNewToken = true,
             string       $pathToSave = "",
             ?bool        $stream = null,
@@ -99,10 +99,12 @@
             array        $customErrors = [], // Ex: ['403' => 'body'] or ['500' => 'code'] or ['404' => 'message']
             bool         $ignoreAuth = false,
             mixed        $onFailure = null,
+            int          $retries = 0,
+            ?int         $maxRetries = null,
         ): mixed
         {
 
-            $sleep = match ($this->accountType) {
+            $sleep = $retries > 0 ? $sleep : match ($this->accountType) {
                 AccountType::standard => 500000,
                 AccountType::advanced => 250000,
                 AccountType::plus => 50000,
@@ -127,7 +129,111 @@
                 customErrors: $customErrors,
                 ignoreAuth: $ignoreAuth,
                 onFailure: $onFailure,
+                retries: $retries,
+                maxRetries: $maxRetries,
             );
+        }
+
+        /** Execute an Admin GraphQL operation and retain its cost metadata. */
+        public function graphql(string $query, array $variables = []): array
+        {
+            $requestBody = json_encode(['query' => $query, 'variables' => (object) $variables], JSON_THROW_ON_ERROR);
+            $detector = $this->getResponseErrorDetector();
+            try {
+                // Handle semantic GraphQL errors here so retries retain the original request body.
+                $this->setResponseErrorDetector(null);
+                for ($attempt = 0; ; $attempt++) {
+                    $response = $this->performRequest(
+                        method: 'POST', endpoint: 'graphql.json', verify: true,
+                        body: $requestBody, headers: ['Content-Type' => 'application/json'],
+                    );
+                    $payload = json_decode((string) $response->getBody(), true, 512, JSON_THROW_ON_ERROR);
+                    if (is_array($payload) && !empty($payload['errors'])) {
+                        if (ShopifyErrorClassifier::isRetryable($payload) && $attempt < $this->getMaxRetries()) {
+                            usleep(min($this->maxBackoffSleepMicroseconds, 1000000 * (2 ** min($attempt, 6))));
+                            continue;
+                        }
+                        throw new \RuntimeException('Shopify GraphQL returned errors: '.json_encode($payload['errors']));
+                    }
+                    if (!is_array($payload) || !isset($payload['data']) || !is_array($payload['data'])) {
+                        throw new \UnexpectedValueException('Invalid Shopify GraphQL response.');
+                    }
+                    $throttle = $payload['extensions']['cost']['throttleStatus'] ?? null;
+                    if (is_array($throttle) && is_numeric($throttle['currentlyAvailable'] ?? null) && is_numeric($throttle['restoreRate'] ?? null)) {
+                        $available = (float) $throttle['currentlyAvailable'];
+                        $restoreRate = (float) $throttle['restoreRate'];
+                        if ($available < 150 && $restoreRate > 0) {
+                            usleep((int) min(5000000, max(0, ceil((150 - $available) / $restoreRate * 1000000))));
+                        }
+                    }
+                    break;
+                }
+            } finally {
+                $this->setResponseErrorDetector($detector);
+            }
+            return $payload;
+        }
+
+        /** Process a GraphQL connection page by page. The operation must accept $cursor. */
+        public function graphqlPaginate(string $query, string $connection, callable $callback, array $variables = [], ?callable $shouldContinue = null): void
+        {
+            $cursor = $variables['cursor'] ?? null;
+            $seen = [];
+            if ($cursor !== null) {
+                $seen[$cursor] = true;
+            }
+            do {
+                if ($shouldContinue !== null && !$shouldContinue()) {
+                    return;
+                }
+                $variables['cursor'] = $cursor;
+                $response = $this->graphql($query, $variables);
+                $page = $response['data'];
+                foreach (explode('.', $connection) as $segment) {
+                    $page = is_array($page) ? ($page[$segment] ?? null) : null;
+                }
+                if (!is_array($page) || !isset($page['pageInfo']['hasNextPage']) || !is_bool($page['pageInfo']['hasNextPage'])) {
+                    throw new \UnexpectedValueException('Invalid Shopify GraphQL connection page.');
+                }
+                $callback($page);
+                if (!$page['pageInfo']['hasNextPage']) {
+                    return;
+                }
+                $cursor = $page['pageInfo']['endCursor'] ?? null;
+                if (!is_string($cursor) || $cursor === '' || isset($seen[$cursor])) {
+                    throw new \UnexpectedValueException('Missing or repeated Shopify GraphQL cursor.');
+                }
+                $seen[$cursor] = true;
+            } while (true);
+        }
+
+        /** Execute ShopifyQL; parse errors must not be mistaken for empty results. */
+        public function shopifyqlQuery(string $query): array
+        {
+            $response = $this->graphql(
+                'query ShopifyQL($query: String!) { shopifyqlQuery(query: $query) { tableData { columns { name dataType displayName } rows } parseErrors } }',
+                ['query' => $query],
+            );
+            $result = $response['data']['shopifyqlQuery'] ?? null;
+            if (!is_array($result)) {
+                throw new \UnexpectedValueException('Missing ShopifyQL result.');
+            }
+            if (!empty($result['parseErrors'])) {
+                throw new \RuntimeException('ShopifyQL parse errors: '.json_encode($result['parseErrors']));
+            }
+            if (!isset($result['tableData']) || !is_array($result['tableData'])) {
+                throw new \UnexpectedValueException('Missing ShopifyQL table data.');
+            }
+            return $result['tableData'];
+        }
+
+        private function decodeRestCollection(Response $response, string $key): array
+        {
+            $payload = json_decode((string) $response->getBody(), true, 512, JSON_THROW_ON_ERROR);
+            if (!is_array($payload) || !isset($payload[$key]) || !is_array($payload[$key])) {
+                throw new \UnexpectedValueException('Invalid Shopify REST collection response: '.$key);
+            }
+            return $payload;
         }
 
         protected function fetchShopifyAllAndProcess(
@@ -138,6 +244,7 @@
         ): void
         {
             $nextPageInfo = null;
+            $seenCursors = [];
 
             do {
                 if ($nextPageInfo) {
@@ -159,12 +266,15 @@
                     query: $pageQuery,
                 );
 
-                $data = json_decode($response->getBody()->getContents(), true);
-                $items = $dataKey ? ($data[$dataKey] ?? []) : $data;
+                $data = json_decode($response->getBody()->getContents(), true, 512, JSON_THROW_ON_ERROR);
+                if (!is_array($data) || ($dataKey !== null && (!isset($data[$dataKey]) || !is_array($data[$dataKey])))) {
+                    throw new \UnexpectedValueException('Invalid Shopify REST collection response.');
+                }
+                $items = $dataKey !== null ? $data[$dataKey] : $data;
 
                 $callback($items);
 
-                $nextPageInfo = $this->extractNextPageInfo($response);
+                $nextPageInfo = $this->guardCursor($this->extractNextPageInfo($response), $seenCursors);
             } while ($nextPageInfo);
         }
 
@@ -174,16 +284,18 @@
          */
         protected function extractNextPageInfo(Response $response): ?string
         {
-            $linkHeader = $response->getHeaderLine('Link');
-            if (!$linkHeader) {
-                return null;
-            }
+            return $this->getCursorFromUrl($response->getHeaderLine('Link'));
+        }
 
-            // Search for rel="next"
-            if (preg_match('/<[^>]*page_info=([^>&\s]+)[^>]*>; rel="next"/', $linkHeader, $matches)) {
-                return $matches[1];
+        private function guardCursor(?string $cursor, array &$seen): ?string
+        {
+            if ($cursor !== null && $cursor !== '') {
+                if (isset($seen[$cursor])) {
+                    throw new \UnexpectedValueException('Repeated Shopify pagination cursor.');
+                }
+                $seen[$cursor] = true;
+                return $cursor;
             }
-
             return null;
         }
 
@@ -285,11 +397,11 @@
             if ($includeHeaders) {
                 return [
                     "headers" => $response->getHeaders(),
-                    "body"    => json_decode($response->getBody()->getContents(), true),
+                    "body"    => $this->decodeRestCollection($response, 'orders'),
                 ];
             }
 
-            return json_decode($response->getBody()->getContents(), true);
+            return $this->decodeRestCollection($response, 'orders');
         }
 
         /**
@@ -485,11 +597,11 @@
             if ($includeHeaders) {
                 return [
                     "headers" => $response->getHeaders(),
-                    "body"    => json_decode($response->getBody()->getContents(), true),
+                    "body"    => $this->decodeRestCollection($response, 'customers'),
                 ];
             }
 
-            return json_decode($response->getBody()->getContents(), true);
+            return $this->decodeRestCollection($response, 'customers');
         }
 
         /**
@@ -700,11 +812,11 @@
             if ($includeHeaders) {
                 return [
                     "headers" => $response->getHeaders(),
-                    "body"    => json_decode($response->getBody()->getContents(), true),
+                    "body"    => $this->decodeRestCollection($response, 'products'),
                 ];
             }
 
-            return json_decode($response->getBody()->getContents(), true);
+            return $this->decodeRestCollection($response, 'products');
         }
 
         /**
@@ -889,11 +1001,11 @@
             if ($includeHeaders) {
                 return [
                     "headers" => $response->getHeaders(),
-                    "body"    => json_decode($response->getBody()->getContents(), true),
+                    "body"    => $this->decodeRestCollection($response, 'inventory_items'),
                 ];
             }
 
-            return json_decode($response->getBody()->getContents(), true);
+            return $this->decodeRestCollection($response, 'inventory_items');
         }
 
         /**
@@ -932,16 +1044,14 @@
             ?int     $limit = 250,
         ): void
         {
-            $query = [];
-            if ($ids) $query["ids"] = implode(",", $ids);
-            $query["limit"] = $limit;
-
-            $this->fetchShopifyAllAndProcess(
-                callback: $callback,
-                endpoint: "inventory_items.json",
-                query: $query,
-                dataKey: 'inventory_items',
-            );
+            foreach (array_chunk($ids, 250) as $chunk) {
+                $this->fetchShopifyAllAndProcess(
+                    callback: $callback,
+                    endpoint: 'inventory_items.json',
+                    query: ['ids' => implode(',', $chunk), 'limit' => $limit],
+                    dataKey: 'inventory_items',
+                );
+            }
         }
 
         /**
@@ -997,7 +1107,7 @@
             );
 
             // Return response
-            return json_decode($response->getBody()->getContents(), true);
+            return json_decode($response->getBody()->getContents(), true, 512, JSON_THROW_ON_ERROR);
         }
 
         /**
@@ -1038,7 +1148,7 @@
             );
 
             // Return response
-            return json_decode($response->getBody()->getContents(), true);
+            return json_decode($response->getBody()->getContents(), true, 512, JSON_THROW_ON_ERROR);
         }
 
         /**
@@ -1109,7 +1219,7 @@
             );
 
             // Return response
-            return json_decode($response->getBody()->getContents(), true);
+            return json_decode($response->getBody()->getContents(), true, 512, JSON_THROW_ON_ERROR);
         }
 
         /**
@@ -1151,6 +1261,7 @@
         {
             $orders = [];
 
+            $seenCursors = $pageInfo !== null ? [$pageInfo => true] : [];
             do {
                 $response = $this->getOrders(
                     pageInfo: $pageInfo,
@@ -1173,7 +1284,7 @@
                 if (!empty($response['body']['orders'])) {
                     $orders = [...$orders, ...$response['body']['orders']];
                 }
-            } while (isset($response['headers']) && ($pageInfo = $this->getNextCursorLink($response['headers'])));
+            } while (isset($response['headers']) && ($pageInfo = $this->guardCursor($this->getNextCursorLink($response['headers']), $seenCursors)));
 
             return ['orders' => $orders];
         }
@@ -1225,6 +1336,7 @@
         {
             $products = [];
 
+            $seenCursors = $pageInfo !== null ? [$pageInfo => true] : [];
             do {
                 $response = $this->getProducts(
                     pageInfo: $pageInfo,
@@ -1251,7 +1363,7 @@
                 if (!empty($response['body']['products'])) {
                     $products = [...$products, ...$response['body']['products']];
                 }
-            } while (isset($response['headers']) && ($pageInfo = $this->getNextCursorLink($response['headers'])));
+            } while (isset($response['headers']) && ($pageInfo = $this->guardCursor($this->getNextCursorLink($response['headers']), $seenCursors)));
 
             return ['products' => $products];
         }
@@ -1267,23 +1379,7 @@
             ?int  $limit = 250, // Max: 250,
         ): array
         {
-            $inventoryItems = [];
-
-            $idsChunks = array_chunk($ids, 250);
-            $page = 0;
-
-            do {
-                $response = $this->getInventoryItems(
-                    ids: $idsChunks[$page],
-                    limit: $limit,
-                );
-                if (!empty($response['inventory_items'])) {
-                    $inventoryItems = [...$inventoryItems, ...$response['inventory_items']];
-                }
-                $page++;
-            } while ($page < count($idsChunks));
-
-            return ['inventory_items' => $inventoryItems];
+            return $this->getInventoryItemsAll($ids, $limit);
         }
 
         /**
@@ -1315,6 +1411,7 @@
         {
             $customers = [];
 
+            $seenCursors = $pageInfo !== null ? [$pageInfo => true] : [];
             do {
                 $response = $this->getCustomers(
                     pageInfo: $pageInfo,
@@ -1332,7 +1429,7 @@
                 if (!empty($response['body']['customers'])) {
                     $customers = [...$customers, ...$response['body']['customers']];
                 }
-            } while (isset($response['headers']) && ($pageInfo = $this->getNextCursorLink($response['headers'])));
+            } while (isset($response['headers']) && ($pageInfo = $this->guardCursor($this->getNextCursorLink($response['headers']), $seenCursors)));
 
             return ['customers' => $customers];
         }
@@ -1371,11 +1468,11 @@
             if ($includeHeaders) {
                 return [
                     "headers" => $response->getHeaders(),
-                    "body"    => json_decode($response->getBody()->getContents(), true),
+                    "body"    => $this->decodeRestCollection($response, 'discount_codes'),
                 ];
             }
 
-            return json_decode($response->getBody()->getContents(), true);
+            return $this->decodeRestCollection($response, 'discount_codes');
         }
 
         /**
@@ -1393,6 +1490,7 @@
         {
             $discount_codes = [];
 
+            $seenCursors = $pageInfo !== null ? [$pageInfo => true] : [];
             do {
                 $response = $this->getDiscountCodes(
                     priceRuleId: $priceRuleId,
@@ -1403,7 +1501,7 @@
                 if (!empty($response['body']['discount_codes'])) {
                     $discount_codes = [...$discount_codes, ...$response['body']['discount_codes']];
                 }
-            } while (isset($response['headers']) && ($pageInfo = $this->getNextCursorLink($response['headers'])));
+            } while (isset($response['headers']) && ($pageInfo = $this->guardCursor($this->getNextCursorLink($response['headers']), $seenCursors)));
 
             return ['discount_codes' => $discount_codes];
         }
@@ -1469,7 +1567,7 @@
                 if ($startsAtMax) {
                     $query["starts_at_max"] = $startsAtMax;
                 }
-                if ($timesUsed) {
+                if ($timesUsed !== null) {
                     $query["times_used"] = $timesUsed;
                 }
                 if ($updatedAtMin) {
@@ -1493,11 +1591,11 @@
             if ($includeHeaders) {
                 return [
                     "headers" => $response->getHeaders(),
-                    "body"    => json_decode($response->getBody()->getContents(), true),
+                    "body"    => $this->decodeRestCollection($response, 'price_rules'),
                 ];
             }
 
-            return json_decode($response->getBody()->getContents(), true);
+            return $this->decodeRestCollection($response, 'price_rules');
         }
 
         /**
@@ -1535,6 +1633,7 @@
         {
             $price_rules = [];
 
+            $seenCursors = $pageInfo !== null ? [$pageInfo => true] : [];
             do {
                 $response = $this->getPriceRules(
                     pageInfo: $pageInfo,
@@ -1555,7 +1654,7 @@
                 if (!empty($response['body']['price_rules'])) {
                     $price_rules = [...$price_rules, ...$response['body']['price_rules']];
                 }
-            } while (isset($response['headers']) && ($pageInfo = $this->getNextCursorLink($response['headers'])));
+            } while (isset($response['headers']) && ($pageInfo = $this->guardCursor($this->getNextCursorLink($response['headers']), $seenCursors)));
 
             return ['price_rules' => $price_rules];
         }
@@ -1653,11 +1752,11 @@
             if ($includeHeaders) {
                 return [
                     "headers" => $response->getHeaders(),
-                    "body"    => json_decode($response->getBody()->getContents(), true),
+                    "body"    => $this->decodeRestCollection($response, 'custom_collections'),
                 ];
             }
 
-            return json_decode($response->getBody()->getContents(), true);
+            return $this->decodeRestCollection($response, 'custom_collections');
         }
 
         /**
@@ -1697,6 +1796,7 @@
         {
             $custom_collections = [];
 
+            $seenCursors = $pageInfo !== null ? [$pageInfo => true] : [];
             do {
                 $response = $this->getCustomCollections(
                     pageInfo: $pageInfo,
@@ -1718,7 +1818,7 @@
                 if (!empty($response['body']['custom_collections'])) {
                     $custom_collections = [...$custom_collections, ...$response['body']['custom_collections']];
                 }
-            } while (isset($response['headers']) && ($pageInfo = $this->getNextCursorLink($response['headers'])));
+            } while (isset($response['headers']) && ($pageInfo = $this->guardCursor($this->getNextCursorLink($response['headers']), $seenCursors)));
 
             return ['custom_collections' => $custom_collections];
         }
@@ -1816,11 +1916,11 @@
             if ($includeHeaders) {
                 return [
                     "headers" => $response->getHeaders(),
-                    "body"    => json_decode($response->getBody()->getContents(), true),
+                    "body"    => $this->decodeRestCollection($response, 'smart_collections'),
                 ];
             }
 
-            return json_decode($response->getBody()->getContents(), true);
+            return $this->decodeRestCollection($response, 'smart_collections');
         }
 
         /**
@@ -1860,6 +1960,7 @@
         {
             $smart_collections = [];
 
+            $seenCursors = $pageInfo !== null ? [$pageInfo => true] : [];
             do {
                 $response = $this->getSmartCollections(
                     pageInfo: $pageInfo,
@@ -1881,7 +1982,7 @@
                 if (!empty($response['body']['smart_collections'])) {
                     $smart_collections = [...$smart_collections, ...$response['body']['smart_collections']];
                 }
-            } while (isset($response['headers']) && ($pageInfo = $this->getNextCursorLink($response['headers'])));
+            } while (isset($response['headers']) && ($pageInfo = $this->guardCursor($this->getNextCursorLink($response['headers']), $seenCursors)));
 
             return ['smart_collections' => $smart_collections];
         }
@@ -1920,11 +2021,11 @@
             if ($includeHeaders) {
                 return [
                     "headers" => $response->getHeaders(),
-                    "body"    => json_decode($response->getBody()->getContents(), true),
+                    "body"    => $this->decodeRestCollection($response, 'products'),
                 ];
             }
 
-            return json_decode($response->getBody()->getContents(), true);
+            return $this->decodeRestCollection($response, 'products');
         }
 
         /**
@@ -1942,6 +2043,7 @@
         {
             $products = [];
 
+            $seenCursors = $pageInfo !== null ? [$pageInfo => true] : [];
             do {
                 $response = $this->getProductsForCollection(
                     pageInfo: $pageInfo,
@@ -1952,7 +2054,7 @@
                 if (!empty($response['body']['products'])) {
                     $products = [...$products, ...$response['body']['products']];
                 }
-            } while (isset($response['headers']) && ($pageInfo = $this->getNextCursorLink($response['headers'])));
+            } while (isset($response['headers']) && ($pageInfo = $this->guardCursor($this->getNextCursorLink($response['headers']), $seenCursors)));
 
             return ['products' => $products];
         }
@@ -2000,11 +2102,11 @@
             if ($includeHeaders) {
                 return [
                     "headers" => $response->getHeaders(),
-                    "body"    => json_decode($response->getBody()->getContents(), true),
+                    "body"    => $this->decodeRestCollection($response, 'collects'),
                 ];
             }
 
-            return json_decode($response->getBody()->getContents(), true);
+            return $this->decodeRestCollection($response, 'collects');
         }
 
         /**
@@ -2024,6 +2126,7 @@
         {
             $collects = [];
 
+            $seenCursors = $pageInfo !== null ? [$pageInfo => true] : [];
             do {
                 $response = $this->getCollects(
                     pageInfo: $pageInfo,
@@ -2035,7 +2138,7 @@
                 if (!empty($response['body']['collects'])) {
                     $collects = [...$collects, ...$response['body']['collects']];
                 }
-            } while (isset($response['headers']) && ($pageInfo = $this->getNextCursorLink($response['headers'])));
+            } while (isset($response['headers']) && ($pageInfo = $this->guardCursor($this->getNextCursorLink($response['headers']), $seenCursors)));
 
             return ['collects' => $collects];
         }
@@ -2060,6 +2163,7 @@
                 return null;
             }
             $query = parse_url($pageInfo, PHP_URL_QUERY);
+            if (!is_string($query)) return null;
             parse_str($query, $params);
 
             return $params['page_info'] ?? null;
@@ -2067,16 +2171,14 @@
 
         protected function getNextCursorLink(array $headers): ?string
         {
-            if (
-                isset($headers['link']) &&
-                isset($headers['link'][0]) &&
-                $headers['link'][0] &&
-                ($headers['link'][0] != "null") &&
-                $pageInfo = $this->getCursorFromUrl($headers['link'][0])
-            ) {
-                return $pageInfo;
+            foreach ($headers as $name => $values) {
+                if (strcasecmp((string) $name, 'link') === 0) {
+                    foreach ((array) $values as $value) {
+                        $cursor = $this->getCursorFromUrl((string) $value);
+                        if ($cursor !== null) return $cursor;
+                    }
+                }
             }
-
             return null;
         }
 
@@ -2093,16 +2195,12 @@
             string $source = 'marketing-kpi-total-sales',
         ): array
         {
-            $headers = $this->headers;
-            $this->headers = [];
             $body = [
                 'request_metadata[path]' => '/store/'.$this->storeName.'/marketing',
                 'source'                 => $source,
                 'token'                  => $this->analyticsToken,
             ];
-            foreach ($shopifyQl as $value) {
-                $body = [...$body, 'q[]' => $value];
-            }
+            $body['q'] = $shopifyQl;
             // Request the spreadsheet data
             $response = $this->performRequest(
                 method: "POST",
@@ -2121,10 +2219,10 @@
                 customErrors: [
                     '403' => 'body',
                 ],
+                ignoreAuth: true,
             );
-            $this->headers = $headers;
             // Return response
-            $contents = json_decode($response->getBody()->getContents(), true);
+            $contents = json_decode($response->getBody()->getContents(), true, 512, JSON_THROW_ON_ERROR);
             if (isset($contents['message'])) {
                 throw new Exception($contents['message']);
             }
@@ -2170,6 +2268,7 @@
         ): void
         {
             $pageInfo = null;
+            $seenCursors = $pageInfo !== null ? [$pageInfo => true] : [];
             do {
                 $response = $this->getOrders(
                     pageInfo: $pageInfo,
@@ -2192,7 +2291,7 @@
                 if (!empty($response['body']['orders']) && $callback) {
                     $callback($response['body']['orders']);
                 }
-            } while (isset($response['headers']) && ($pageInfo = $this->getNextCursorLink($response['headers'])));
+            } while (isset($response['headers']) && ($pageInfo = $this->guardCursor($this->getNextCursorLink($response['headers']), $seenCursors)));
         }
 
         /**
@@ -2223,6 +2322,7 @@
         ): void
         {
             $pageInfo = null;
+            $seenCursors = $pageInfo !== null ? [$pageInfo => true] : [];
             do {
                 $response = $this->getCustomers(
                     pageInfo: $pageInfo,
@@ -2240,7 +2340,7 @@
                 if (!empty($response['body']['customers']) && $callback) {
                     $callback($response['body']['customers']);
                 }
-            } while (isset($response['headers']) && ($pageInfo = $this->getNextCursorLink($response['headers'])));
+            } while (isset($response['headers']) && ($pageInfo = $this->guardCursor($this->getNextCursorLink($response['headers']), $seenCursors)));
         }
 
         /**
@@ -2289,6 +2389,7 @@
         ): void
         {
             $pageInfo = null;
+            $seenCursors = $pageInfo !== null ? [$pageInfo => true] : [];
             do {
                 $response = $this->getProducts(
                     pageInfo: $pageInfo,
@@ -2315,7 +2416,7 @@
                 if (!empty($response['body']['products']) && $callback) {
                     $callback($response['body']['products']);
                 }
-            } while (isset($response['headers']) && ($pageInfo = $this->getNextCursorLink($response['headers'])));
+            } while (isset($response['headers']) && ($pageInfo = $this->guardCursor($this->getNextCursorLink($response['headers']), $seenCursors)));
         }
 
         /**
@@ -2351,6 +2452,7 @@
             ?callable $callback = null
         ): void
         {
+            $seenCursors = $pageInfo !== null ? [$pageInfo => true] : [];
             do {
                 $response = $this->getPriceRules(
                     pageInfo: $pageInfo,
@@ -2370,7 +2472,7 @@
                 if (!empty($response['body']['price_rules']) && $callback) {
                     $callback($response['body']['price_rules']);
                 }
-            } while (isset($response['headers']) && ($pageInfo = $this->getNextCursorLink($response['headers'])));
+            } while (isset($response['headers']) && ($pageInfo = $this->guardCursor($this->getNextCursorLink($response['headers']), $seenCursors)));
         }
 
         /**
@@ -2386,6 +2488,7 @@
             ?callable  $callback = null
         ): void
         {
+            $seenCursors = $pageInfo !== null ? [$pageInfo => true] : [];
             do {
                 $response = $this->getDiscountCodes(
                     priceRuleId: $priceRuleId,
@@ -2395,6 +2498,6 @@
                 if (!empty($response['body']['discount_codes']) && $callback) {
                     $callback($response['body']['discount_codes']);
                 }
-            } while (isset($response['headers']) && ($pageInfo = $this->getNextCursorLink($response['headers'])));
+            } while (isset($response['headers']) && ($pageInfo = $this->guardCursor($this->getNextCursorLink($response['headers']), $seenCursors)));
         }
     }

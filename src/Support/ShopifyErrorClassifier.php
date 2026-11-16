@@ -26,7 +26,7 @@
             }
 
             return [
-                'message' => $message !== '' ? $message : self::extractMessageFallback($input),
+                'message' => $message !== null && $message !== '' ? $message : self::extractMessageFallback($input),
                 'status'  => self::extractStatusCode($input),
                 'raw'     => $errors,
             ];
@@ -55,6 +55,23 @@
                     'should_retry' => true,
                     'delay_ms'     => 1000,
                 ];
+            }
+
+            if (in_array($status, [401, 403], true) || str_contains($message, 'access_denied') || str_contains($message, 'access denied')) {
+                return ['category' => 'fatal_auth', 'reason' => 'shopify_access_denied', 'should_retry' => false, 'delay_ms' => 0];
+            }
+            if ($status === 404) {
+                return ['category' => 'not_found', 'reason' => 'shopify_not_found', 'should_retry' => false, 'delay_ms' => 0];
+            }
+
+            if ($status !== null && $status >= 500 && $status <= 599) {
+                return ['category' => 'retryable', 'reason' => 'shopify_server_error', 'should_retry' => true, 'delay_ms' => 1000];
+            }
+            if (str_contains($message, 'internal_server_error')) {
+                return ['category' => 'retryable', 'reason' => 'shopify_server_error', 'should_retry' => true, 'delay_ms' => 1000];
+            }
+            if (str_contains($message, 'response_too_large') || str_contains($message, 'graphql_validation_failed')) {
+                return ['category' => 'invalid_request', 'reason' => 'shopify_query_error', 'should_retry' => false, 'delay_ms' => 0];
             }
 
             return [
@@ -128,6 +145,11 @@
         {
             if ($input instanceof RequestException && $input->hasResponse()) {
                 return $input->getResponse()->getStatusCode();
+            }
+
+            if ($input instanceof Exception && $input->getPrevious() !== null) {
+                $status = self::extractStatusCode($input->getPrevious());
+                if ($status !== null) return $status;
             }
 
             if ($input instanceof Exception && is_numeric($input->getCode()) && $input->getCode() > 0) {
